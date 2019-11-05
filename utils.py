@@ -110,12 +110,12 @@ def preprocess_features(df):
 
     df['TimeHandoff'] = pd.to_datetime(df['TimeHandoff'], utc=True)
     df['TimeSnap'] = pd.to_datetime(df['TimeSnap'], utc=True)
-    df['TimeDelta'] = df.apply(lambda row: (row['TimeHandoff'] - row['TimeSnap']).total_seconds(), axis=1)
+    df['TimeDelta'] = (df['TimeHandoff']-df['TimeSnap']).apply(lambda x: x.total_seconds())
     df['PlayerBirthDate'] = df['PlayerBirthDate'].apply(lambda x: datetime.datetime.strptime(x, "%m/%d/%Y"))
     df['PlayerBirthDate'] = pd.to_datetime(df['PlayerBirthDate'], utc=True)
 
     seconds_in_year = 60*60*24*365.25
-    df['PlayerAge'] = df.apply(lambda row: (row['TimeHandoff']-row['PlayerBirthDate']).total_seconds()/seconds_in_year, axis=1)
+    df['PlayerAge'] = (df['TimeHandoff']-df['PlayerBirthDate']).apply(lambda x: x.total_seconds())/seconds_in_year
     df = df.drop(['TimeHandoff', 'TimeSnap', 'PlayerBirthDate'], axis=1)
 
     df['WindSpeed'] = df['WindSpeed'].apply(lambda x: x.lower().replace('mph', '').strip() if not pd.isna(x) else x)
@@ -159,15 +159,15 @@ def make_x(df):
     df = df.drop(cols_delete, axis=1)
 
     # Fill nan
-    df = df.fillna(method='pad')
+    df = df.fillna(-999)#, method='pad')
 
     # Text features
-    text = []
+    text_cols = []
     for col in df.columns:
         if df[col].dtype =='object':
-            text.append(col)
+            text_cols.append(col)
 
-    df = df.drop(text, axis=1)
+    df = df.drop(text_cols, axis=1)
 
     # Player features
     cols_player = ['X',
