@@ -4,6 +4,22 @@ from string import punctuation
 import datetime
 import re
 
+def crps(y_true, y_pred):
+    return np.mean(np.square(y_true - y_pred), axis=1)
+
+def yard_to_cdf(yard):
+    yard = np.round(yard).astype(int)
+    indices = yard+99
+    cdfs = np.zeros((yard.shape[0], 199))
+    for i in range(len(cdfs)):
+        cdfs[i, indices[i]:] = 1
+    return cdfs
+
+def cdf_to_yard(cdf):
+    yard_index = (cdf==1).argmax(axis=1)
+    yard = yard_index-99
+    return yard
+
 def clean_StadiumType(txt):
     if pd.isna(txt):
         return np.nan
@@ -145,7 +161,9 @@ def preprocess_features(df):
     
     df['YardsLeft'] = df.apply(lambda row: 100-row['YardLine'] if row['HomeField'] else row['YardLine'], axis=1)
     df['YardsLeft'] = df.apply(lambda row: row['YardsLeft'] if row['PlayDirection'] else 100-row['YardsLeft'], axis=1)
-    df.drop(df.index[(df['YardsLeft']<df['Yards']) | (df['YardsLeft']-100>df['Yards'])], inplace=True)
+    if 'Yards' in df.columns:
+        # Dropping outliers in training
+        df.drop(df.index[(df['YardsLeft']<df['Yards']) | (df['YardsLeft']-100>df['Yards'])], inplace=True)
     return df
 
 def sort_df(df):
