@@ -117,6 +117,9 @@ def preprocess_features(df):
     df['Field_eq_Possession'] = df['FieldPosition'] == df['PossessionTeam']
     df['HomeField'] = df['FieldPosition'] == df['HomeTeamAbbr']
 
+    # in posession
+    df['InPosession']=(((df.Team == 'home') & (df.PossessionTeam == df.HomeTeamAbbr)) | ((df.Team == 'away') & (df.PossessionTeam == df.VisitorTeamAbbr)))
+
     df = pd.concat([df.drop(['OffenseFormation'], axis=1), pd.get_dummies(df['OffenseFormation'], prefix='Formation')], axis=1)
     
     df['GameClock'] = df['GameClock'].apply(str_to_seconds)
@@ -138,11 +141,12 @@ def preprocess_features(df):
     df['WindSpeed'] = df['WindSpeed'].apply(lambda x: (int(x.split('-')[0])+int(x.split('-')[1]))/2 if not pd.isna(x) and '-' in x else x)
     df['WindSpeed'] = df['WindSpeed'].apply(lambda x: (int(x.split()[0])+int(x.split()[-1]))/2 if not pd.isna(x) and type(x)!=float and 'gusts up to' in x else x)
     df['WindSpeed'] = df['WindSpeed'].apply(str_to_float)
-    df['WindSpeed'] = df['WindSpeed'].fillna(method='pad')
 
     df = df.drop(['WindDirection'], axis=1)
     df['PlayDirection'] = df['PlayDirection'].apply(lambda x: x.strip() == 'right')
-    df['Team'] = df['Team'].apply(lambda x: x.strip()=='home')
+    df['IsHomeTeam'] = df['Team'].apply(lambda x: x.strip()=='home')
+
+
 
     df['GameWeather'] = df['GameWeather'].str.lower()
     indoor = "indoor"
@@ -161,23 +165,60 @@ def preprocess_features(df):
     
     df['YardsLeft'] = df.apply(lambda row: 100-row['YardLine'] if row['HomeField'] else row['YardLine'], axis=1)
     df['YardsLeft'] = df.apply(lambda row: row['YardsLeft'] if row['PlayDirection'] else 100-row['YardsLeft'], axis=1)
-    if 'Yards' in df.columns:
-        # Dropping outliers in training
-        df.drop(df.index[(df['YardsLeft']<df['Yards']) | (df['YardsLeft']-100>df['Yards'])], inplace=True)
+    
+
+    # DefensePersonnel
+    counts = []
+    for i, val in df['DefensePersonnel'].str.split(',').iteritems():
+        row = {'DL':0,
+          'LB': 0,
+          'DB': 0,
+          'OL': 0}
+        if val is np.NaN:
+            counts.append({})
+            continue
+        for item in val:
+            name, number = item.strip().split(' ')[::-1]
+            row[name] = int(number)
+        counts.append(row)
+    defense_presonell_df = pd.DataFrame(counts)
+    defense_presonell_df.columns = ['defense_'+x for x in defense_presonell_df.columns]
+    defense_presonell_df = defense_presonell_df.fillna(0).astype(int)
+    defense_presonell_df.index = df.index
+    df = pd.concat([df.drop(['DefensePersonnel'], axis=1), defense_presonell_df], axis=1)
+
+
+    # OffensePersonnel
+    counts = []
+    for i, val in df['OffensePersonnel'].str.split(',').iteritems():
+        row = {'OL': 0, 'RB': 0, 'TE': 0, 'WR': 0, 'DL': 0}
+        if val is np.NaN:
+            counts.append({})
+            continue
+        for item in val:
+            name, number = item.strip().split(' ')[::-1]
+            row[name] = int(number)
+        counts.append(row)
+    offense_personnel_df = pd.DataFrame(counts)
+    offense_personnel_df.columns = ['offense_'+x for x in offense_personnel_df.columns]
+    offense_personnel_df = offense_personnel_df.fillna(0).astype(int)
+    offense_personnel_df.index = df.index
+    df = pd.concat([df.drop(['OffensePersonnel'], axis=1), offense_personnel_df], axis=1)
+    df = sort_df(df)
     return df
 
 def sort_df(df):
-    df = df.sort_values(by=['PlayId', 'Team', 'IsRusher', 'JerseyNumber']).reset_index(drop=True)
+    df = df.sort_values(by=['PlayId', 'InPosession', 'IsRusher']).reset_index(drop=True)
     return df
 
 def make_x(df):
-    df = sort_df(df)
+    source_play_id = df['PlayId']
 
     cols_delete = ['GameId', 'PlayId', 'IsRusher', 'Team']
     df = df.drop(cols_delete, axis=1)
 
     # Fill nan
-    df = df.fillna(-999)#, method='pad')
+    # df = df.fillna(-999)#, method='pad')
 
     # Text features
     text_cols = []
@@ -200,9 +241,16 @@ def make_x(df):
          'PlayerWeight',
          'PlayerBMI',
          'PlayerAge']
+
+    all_cols_player = np.array([[f'pl{num}_'+x for x in cols_player] for num in range(1, 23)]).flatten()
+
     X = np.array(df[cols_player]).reshape(-1, len(cols_player)*22)
-    assert df[cols_player].shape[0] == X.shape[0] * 22
-    assert df[cols_player].shape[1] == X.shape[1] / 22
+
+    play_id_index = source_play_id[::22]
+    X_df = pd.DataFrame(X, columns=all_cols_player, index=play_id_index)
+
+    assert df[cols_player].shape[0] == X_df.shape[0] * 22
+    assert df[cols_player].shape[1] == X_df.shape[1] / 22
 
     # Play features
     cols_play = list(df.drop(cols_player+(['Yards'] if 'Yards' in df.columns else []), axis=1).columns)
@@ -210,10 +258,12 @@ def make_x(df):
     for i, col in enumerate(cols_play):
         X_play_col[:, i] = df[col][::22]
 
-    assert X.shape[0] == X_play_col.shape[0]
-    X = np.concatenate([X, X_play_col], axis=1)
+    X_play_col_df = pd.DataFrame(X_play_col, columns=cols_play, index=play_id_index)
+    assert X_df.shape[0] == X_play_col_df.shape[0]
+    X_df = pd.concat([X_df, X_play_col_df], axis=1)
 
-    return X
+    assert X_df.shape[0] == source_play_id.drop_duplicates().count()
+    return X_df
 
 def make_y(X, df):
     y = np.zeros(shape=(X.shape[0], 199))
