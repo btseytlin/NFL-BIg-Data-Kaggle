@@ -86,7 +86,7 @@ def new_orientation(angle, play_direction):
     else:
         return angle
 
-def preprocess_features(df):
+def preprocess_features(df, fillna=False):
     """Accepts df like train data, returns X, y"""
 
     # Feature engineering
@@ -105,12 +105,20 @@ def preprocess_features(df):
     df['TurfIsNatural'] = (turf_type == 'Natural')
     df = df.drop(['Turf'], axis=1)
 
+    # CAREFUL. What if a new team appears?
     map_abbr = {'ARI': 'ARZ', 'BAL': 'BLT', 'CLE': 'CLV', 'HOU': 'HST'}
     for abb in df['PossessionTeam'].unique():
         map_abbr[abb] = abb
-    df['PossessionTeam'] = df['PossessionTeam'].map(map_abbr)
-    df['HomeTeamAbbr'] = df['HomeTeamAbbr'].map(map_abbr)
-    df['VisitorTeamAbbr'] = df['VisitorTeamAbbr'].map(map_abbr)
+
+    def safe_map(val):
+        if map_abbr.get('val'):
+            return map_abbr[val]
+        else:
+            return val
+
+    df['PossessionTeam'] = df['PossessionTeam'].apply(safe_map)
+    df['HomeTeamAbbr'] = df['HomeTeamAbbr'].apply(safe_map)
+    df['VisitorTeamAbbr'] = df['VisitorTeamAbbr'].apply(safe_map)
 
     df['HomePossesion'] = (df['PossessionTeam'] == df['HomeTeamAbbr'])
 
@@ -120,8 +128,22 @@ def preprocess_features(df):
     # in posession
     df['InPosession']=(((df.Team == 'home') & (df.PossessionTeam == df.HomeTeamAbbr)) | ((df.Team == 'away') & (df.PossessionTeam == df.VisitorTeamAbbr)))
 
-    df = pd.concat([df.drop(['OffenseFormation'], axis=1), pd.get_dummies(df['OffenseFormation'], prefix='Formation')], axis=1)
-    
+    # Formation columns
+    df = pd.concat([df.drop(['OffenseFormation'], axis=1), pd.get_dummies(df['OffenseFormation'], prefix='OffenseFormation')], axis=1)
+    # Filling missing dummy columns at test stage
+    expected_columns = ['OffenseFormation_ACE',
+         'OffenseFormation_EMPTY',
+         'OffenseFormation_JUMBO',
+         'OffenseFormation_PISTOL',
+         'OffenseFormation_SHOTGUN',
+         'OffenseFormation_SINGLEBACK',
+         'OffenseFormation_WILDCAT',
+         'OffenseFormation_I_FORM']
+    for col in expected_columns:
+        if not col in df.columns:
+            df[col] = 0
+
+
     df['GameClock'] = df['GameClock'].apply(str_to_seconds)
 
     df['PlayerHeight'] = df['PlayerHeight'].apply(lambda x: 12*int(x.split('-')[0])+int(x.split('-')[1]))
@@ -170,10 +192,7 @@ def preprocess_features(df):
     # DefensePersonnel
     counts = []
     for i, val in df['DefensePersonnel'].str.split(',').iteritems():
-        row = {'DL':0,
-          'LB': 0,
-          'DB': 0,
-          'OL': 0}
+        row = {'OL': 0, 'RB': 0, 'TE': 0, 'WR': 0, 'DL': 0, 'DB': 0, 'LB': 0, 'QB': 0}
         if val is np.NaN:
             counts.append({})
             continue
@@ -191,7 +210,7 @@ def preprocess_features(df):
     # OffensePersonnel
     counts = []
     for i, val in df['OffensePersonnel'].str.split(',').iteritems():
-        row = {'OL': 0, 'RB': 0, 'TE': 0, 'WR': 0, 'DL': 0}
+        row = {'OL': 0, 'RB': 0, 'TE': 0, 'WR': 0, 'DL': 0, 'DB': 0, 'LB': 0, 'QB': 0}
         if val is np.NaN:
             counts.append({})
             continue
@@ -204,7 +223,12 @@ def preprocess_features(df):
     offense_personnel_df = offense_personnel_df.fillna(0).astype(int)
     offense_personnel_df.index = df.index
     df = pd.concat([df.drop(['OffensePersonnel'], axis=1), offense_personnel_df], axis=1)
+    
+
     df = sort_df(df)
+
+    if fillna:
+        df.fillna(-999, inplace=True)
     return df
 
 def sort_df(df):
@@ -218,14 +242,18 @@ def make_x(df):
     df = df.drop(cols_delete, axis=1)
 
     # Fill nan
-    # df = df.fillna(-999)#, method='pad')
 
     # Text features
-    text_cols = []
-    for col in df.columns:
-        if df[col].dtype =='object':
-            text_cols.append(col)
-
+    text_cols = [
+        'FieldPosition',
+         'DisplayName',
+         'PossessionTeam',
+         'PlayerCollegeName',
+         'Position',
+         'HomeTeamAbbr',
+         'VisitorTeamAbbr',
+         'Stadium',
+         'Location']
     df = df.drop(text_cols, axis=1)
 
     # Player features
