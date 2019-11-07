@@ -3,6 +3,7 @@ import numpy as np
 from string import punctuation
 import datetime
 import re
+import torch
 
 def crps(y_true, y_pred):
     return np.mean(np.square(y_true - y_pred), axis=1)
@@ -20,6 +21,24 @@ def cdf_to_yard(cdf):
     yard = yard_index-99
     return yard
 
+
+def cdf_to_yard_torch(cdf):
+    yard_index = torch.sum((torch.as_tensor(cdf) <= 0),dim=1)
+    yard = yard_index-99
+    return yard
+
+def crps_torch(y_true, y_pred):
+    y_true = torch.as_tensor(y_true)
+    y_pred = torch.as_tensor(y_pred)
+    return torch.mean((y_true - y_pred).pow(2), dim=1)
+
+def crps_loss(y_true, y_pred_pdf):
+    y_pred_cdf = torch.cumsum(torch.as_tensor(y_pred_pdf), dim=1)
+    return crps_torch(y_true, y_pred_cdf).mean()
+
+def crps_loss_cdf(y_true, y_pred_cdf):
+    return crps_torch(y_true, y_pred_cdf).mean()
+    
 def clean_StadiumType(txt):
     if pd.isna(txt):
         return np.nan
