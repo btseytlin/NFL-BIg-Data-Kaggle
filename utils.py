@@ -5,6 +5,7 @@ import datetime
 import re
 import torch
 import math
+import tqdm 
 
 def crps(y_true, y_pred):
     return np.mean(np.square(y_true - y_pred), axis=1)
@@ -115,8 +116,8 @@ def final_drop_cols(df):
          'VisitorTeamAbbr',
          'Stadium',
          'Location',
-         'GameId', 'PlayId', 'IsRusher', 'Team',
-         'IsRusher']
+         'GameId', 'PlayId', 'Team',
+         'IsRusher', 'IsQB']
     cols_to_drop = list(set(cols_to_drop).intersection(set(list(df.columns))))
     df = df.drop(cols_to_drop, axis=1)
     return df
@@ -188,7 +189,7 @@ def clean_abbrs(df):
         map_abbr[abb] = abb
 
     def safe_map(val):
-        if map_abbr.get('val'):
+        if map_abbr.get(val):
             return map_abbr[val]
         else:
             return val
@@ -196,6 +197,7 @@ def clean_abbrs(df):
     df['PossessionTeam'] = df['PossessionTeam'].apply(safe_map)
     df['HomeTeamAbbr'] = df['HomeTeamAbbr'].apply(safe_map)
     df['VisitorTeamAbbr'] = df['VisitorTeamAbbr'].apply(safe_map)
+    df['FieldPosition'] = df['FieldPosition'].apply(safe_map)
     return df
 
 def encode_formations(df):
@@ -269,8 +271,133 @@ def encode_personell(df):
     df = pd.concat([df.drop(['OffensePersonnel'], axis=1), offense_personnel_df], axis=1)
     return df
 
+# Feature engineering
+
+def add_play_phys_features(play_id, df):
+    play_index = df['PlayId'] == play_id
+    play_df = df[play_index]
+    offense_index = (play_index & df.IsOnOffense)
+    defense_index = (play_index & ~df.IsOnOffense)
+    offense_df = play_df[offense_index]
+    defense_df = play_df[defense_index]
+    
+    offense_spread_x = offense_df.X.max()-offense_df.X.min()
+    offense_spread_y = offense_df.Y.max()-offense_df.Y.min()
+    offense_centroid_x =  offense_df.X.mean()
+    offense_centroid_y =  offense_df.Y.mean()
+    offense_x_std = offense_df.X.std()
+    offense_y_std = offense_df.Y.std()
+    offense_mean_force = offense_df.Force.mean()
+    offense_mean_dir = offense_df.Dir.mean()
+    
+    defense_spread_x = defense_df.X.max()-defense_df.X.min()
+    defense_centroid_x =  defense_df.X.mean()
+    defense_x_std = defense_df.X.std()
+    defense_spread_y = defense_df.Y.max()-defense_df.Y.min()
+    defense_centroid_y =  defense_df.Y.mean()
+    defense_y_std = defense_df.Y.std()
+    defense_mean_force = defense_df.Force.mean()
+    defense_mean_dir = defense_df.Dir.mean()
+
+    rusher_row = offense_df[offense_df.IsRusher].iloc[0]
+
+    qb_row = offense_df[offense_df.Position == 'QB']
+    if not qb_row.empty:
+        qb_row = qb_row.iloc[0]
+
+    offense_centroid_pos = np.array([offense_centroid_x, offense_centroid_y])
+    defense_centroid_pos = np.array([defense_centroid_x, defense_centroid_y])
+    rusher_pos = rusher_row[['X', 'Y']].values[0]
+    qb_pos = qb_row[['X', 'Y']].values[0] if not qb_row.empty else None
+
+    rusher_dist_to_qb = np.linalg.norm(rusher_pos-qb_pos) if not qb_row.empty else None
+    rusher_dist_to_offense_centroid = np.linalg.norm(rusher_pos-offense_centroid_pos)
+    rusher_dist_to_defence_centroid = np.linalg.norm(rusher_pos-defense_centroid_pos)
+
+    # Defender to rusher distances
+    defense_distances_to_runner = []
+    for row in defense_df.itertuples():
+        pos = np.array([row.X, row.Y])
+        defense_distances_to_runner.append(np.linalg.norm(rusher_pos-pos))
+    dist_to_rusher = defense_distances_to_runner = np.array(defense_distances_to_runner)
+
+    time_to_rusher = defense_df['S'] / dist_to_rusher
+
+    defender_dist_to_runner_min = defense_distances_to_runner.min()
+    defender_dist_to_runner_mean = defense_distances_to_runner.mean()
+    defender_dist_to_runner_std = defense_distances_to_runner.std()
+
+    defender_time_to_runner_min = time_to_rusher.min()
+    defender_time_to_runner_mean = time_to_rusher.mean()
+
+    # closest defenders
+    closest_defender = defense_df[dist_to_rusher == defender_dist_to_runner_min].iloc[0]
+    closest_bytime_defender = defense_df[time_to_rusher == defender_time_to_runner_min].iloc[0]
+
+    closest_defender_force_div_rusher_force = (closest_defender.Force/rusher_row.Force)
+    closest_bytime_defender_force_div_rusher_force = (closest_bytime_defender.Force/rusher_row.Force)
+
+    closest_bytime_defender_speed_div_rusher_speed = closest_bytime_defender.S/rusher_row.S
+    closest_bytime_defender_acceleration_div_rusher_acceleration = closest_bytime_defender.A/rusher_row.A
+
+    # Add play features
+    new_play_features = pd.DataFrame({
+        # 'offense_spread_x': offense_spread_x, 
+        # 'offense_spread_y': offense_spread_y, 
+        #'offense_centroid_x': offense_centroid_x, 
+        #'offense_centroid_y': offense_centroid_y, 
+        'offense_x_std': offense_x_std, 
+        'offense_y_std': offense_y_std, 
+        'offense_mean_force': offense_mean_force, 
+        #'offense_mean_dir': offense_mean_dir, 
+        #'defense_spread_x': defense_spread_x, 
+        #'defense_centroid_x': defense_centroid_x, 
+        'defense_x_std': defense_x_std, 
+        #'defense_spread_y': defense_spread_y, 
+        #'defense_centroid_y': defense_centroid_y, 
+        'defense_y_std': defense_y_std, 
+        'defense_mean_force': defense_mean_force,
+        #'defense_mean_dir': defense_mean_dir, 
+
+        'rusher_dist_to_qb': rusher_dist_to_qb,
+        'rusher_dist_to_offense_centroid': rusher_dist_to_offense_centroid,
+        'rusher_dist_to_defence_centroid': rusher_dist_to_defence_centroid,
+
+        'defender_dist_to_runner_min': defender_dist_to_runner_min,
+        'defender_dist_to_runner_mean': defender_dist_to_runner_mean,
+        'defender_dist_to_runner_std': defender_dist_to_runner_std,
+
+        'defender_time_to_runner_min': defender_time_to_runner_min,
+        'defender_time_to_runner_mean': defender_time_to_runner_mean,
+
+        'closest_defender_force_div_rusher_force': closest_defender_force_div_rusher_force,
+        'closest_bytime_defender_force_div_rusher_force': closest_bytime_defender_force_div_rusher_force,
+
+        'closest_bytime_defender_speed_div_rusher_speed': closest_bytime_defender_speed_div_rusher_speed,
+        'closest_bytime_defender_acceleration_div_rusher_acceleration': closest_bytime_defender_acceleration_div_rusher_acceleration,
+
+    }, index=play_df.index)
+
+    return new_play_features
+
+def add_phys_features(df):
+    df['Force'] = df['A']*df['PlayerWeight']
+    
+    feature_dfs = []
+    for play_id in tqdm.tqdm(df.PlayId.unique()):
+        feature_dfs.append(add_play_phys_features(play_id, df))
+        
+    feature_df = pd.concat(feature_dfs)
+    
+    df_new = pd.concat([df, feature_df], join='inner', axis=1)
+    assert df_new.shape[0] == df.shape[0]
+    return df_new
+
+
 def engineer_features(df):
     df['DefendersInTheBox_vs_Distance'] = (df['DefendersInTheBox'] / df['Distance'])
+
+    df = add_phys_features(df)
     return df
 
 
@@ -312,7 +439,7 @@ def preprocess_features(df):
     df = clean_weather(df)
 
     df['IsRusher'] = df['NflId'] == df['NflIdRusher']
-    
+    df['IsQB'] = df['Position'] == 'QB'
 
     df = encode_personell(df)
 
@@ -324,7 +451,7 @@ def preprocess_features(df):
     return df
 
 def sort_df(df):
-    df.sort_values(by=['PlayId', 'IsOnOffense', 'IsRusher'], inplace=True)
+    df.sort_values(by=['PlayId', 'IsOnOffense', 'IsRusher', 'IsQB'], inplace=True)
     return df
 
 def make_x(df, fillna=True):
@@ -347,7 +474,8 @@ def make_x(df, fillna=True):
          'PlayerHeight',
          'PlayerWeight',
          'PlayerBMI',
-         'PlayerAge']
+         'PlayerAge',
+         'Force']
 
     all_cols_player = np.array([[f'pl{num}_'+x for x in cols_player] for num in range(1, 23)]).flatten()
     # print('cols player', all_cols_player)
@@ -361,8 +489,8 @@ def make_x(df, fillna=True):
     assert df[cols_player].shape[1] == X_df.shape[1] / 22
 
     # Play features
-    # print(list(df.drop(cols_player, axis=1).columns))
-    cols_play = ['Season', 'YardLine', 'Quarter', 'GameClock', 'Down', 'Distance', 'HomeScoreBeforePlay', 'VisitorScoreBeforePlay', 'DefendersInTheBox', 'Week', 'GameWeather', 'Temperature', 'Humidity', 'WindSpeed', 'ToLeft', 'IsOnOffense', 'HomeOnOffense', 'TurfIsNatural', 'StadiumTypeShort', 'HomeField', 'Field_eq_Possession', 'HomePossesion', 'OffenseFormation_ACE', 'OffenseFormation_EMPTY', 'OffenseFormation_I_FORM', 'OffenseFormation_JUMBO', 'OffenseFormation_PISTOL', 'OffenseFormation_SHOTGUN', 'OffenseFormation_SINGLEBACK', 'OffenseFormation_WILDCAT', 'TimeDelta', 'defense_DB', 'defense_DL', 'defense_LB', 'defense_OL', 'defense_QB', 'defense_RB', 'defense_TE', 'defense_WR', 'offense_DB', 'offense_DL', 'offense_LB', 'offense_OL', 'offense_QB', 'offense_RB', 'offense_TE', 'offense_WR', 'DefendersInTheBox_vs_Distance']
+    # print()
+    cols_play = list(df.drop(cols_player, axis=1).columns)
 
     X_play_col = np.zeros(shape=(X.shape[0], len(cols_play)))
     for i, col in enumerate(cols_play):
@@ -380,4 +508,3 @@ def make_y(X, df):
     for i, yard in enumerate(df['Yards'][::22]):
         y[i, yard+99:] = np.ones(shape=(1, 100-yard))
     return y
-
