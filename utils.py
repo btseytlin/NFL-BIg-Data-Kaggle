@@ -5,7 +5,8 @@ import datetime
 import re
 import torch
 import math
-from tqdm.notebook import tqdm
+import tqdm
+
 
 def reduce_mem_usage(df, verbose=True):
     numerics = ['int16', 'int32', 'int64', 'float16', 'float32', 'float64']
@@ -336,7 +337,7 @@ def engineer_features(df):
     df = add_phys_features(df)
     return df
 
-def preprocess_features(df):
+def preprocess_features(df, verbose=False):
     """Accepts df like train data, returns cleaned, standartized and enriched df"""
 
     df = clean_abbrs(df)
@@ -378,12 +379,13 @@ def preprocess_features(df):
 
     df = sort_df(df)
 
-    df = reduce_mem_usage(df)
+    if df.shape[0] > 1000:
+        df = reduce_mem_usage(df, verbose=verbose)
 
     return df
 
 def sort_df(df):
-    df.sort_values(by=['PlayId', 'IsOnOffense', 'IsRusher', 'IsQB'], inplace=True)
+    df.sort_values(by=['PlayId', 'IsOnOffense', 'IsRusher', 'IsQB', 'Position'], inplace=True)
     return df
 
 def make_y(df):
@@ -400,15 +402,11 @@ def compute_play_phys_features(play_id, play_df):
     offense_df = play_df[offense_index]
     defense_df = play_df[defense_index]
 
-    offense_centroid_x = offense_df.X.mean()
-    offense_centroid_y = offense_df.Y.mean()
     offense_x_std = offense_df.X.std()
     offense_y_std = offense_df.Y.std()
     offense_mean_force = offense_df.Force.mean()
 
-    defense_centroid_x = defense_df.X.mean()
     defense_x_std = defense_df.X.std()
-    defense_centroid_y = defense_df.Y.mean()
     defense_y_std = defense_df.Y.std()
     defense_mean_force = defense_df.Force.mean()
 
@@ -418,17 +416,11 @@ def compute_play_phys_features(play_id, play_df):
     if not qb_row.empty:
         qb_row = qb_row.iloc[0]
 
-    offense_centroid_pos = np.array([offense_centroid_x, offense_centroid_y])
-    defense_centroid_pos = np.array([defense_centroid_x, defense_centroid_y])
     rusher_pos = rusher_row[['X', 'Y']].values[0]
     qb_pos = qb_row[['X', 'Y']].values[0] if not qb_row.empty else None
 
     rusher_dist_to_qb = np.linalg.norm(
         rusher_pos - qb_pos) if not qb_row.empty else None
-    rusher_dist_to_offense_centroid = np.linalg.norm(
-        rusher_pos - offense_centroid_pos)
-    rusher_dist_to_defence_centroid = np.linalg.norm(
-        rusher_pos - defense_centroid_pos)
 
     # Defender to rusher distances
     defense_distances_to_runner = []
@@ -440,18 +432,12 @@ def compute_play_phys_features(play_id, play_df):
 
     time_to_rusher = defense_df['S'] / dist_to_rusher
 
-    defender_dist_to_runner_min = defense_distances_to_runner.min()
-
     defender_time_to_runner_min = time_to_rusher.min()
 
     # closest defenders
-    closest_defender = \
-        defense_df[dist_to_rusher == defender_dist_to_runner_min].iloc[0]
     closest_bytime_defender = \
         defense_df[time_to_rusher == defender_time_to_runner_min].iloc[0]
 
-    closest_defender_force_div_rusher_force = (
-        closest_defender.Force / rusher_row.Force)
     closest_bytime_defender_force_div_rusher_force = (
         closest_bytime_defender.Force / rusher_row.Force)
 
@@ -468,14 +454,8 @@ def compute_play_phys_features(play_id, play_df):
         'phys_defense_mean_force': defense_mean_force,
 
         'phys_rusher_dist_to_qb': rusher_dist_to_qb,
-        'phys_rusher_dist_to_offense_centroid': rusher_dist_to_offense_centroid,
-        'phys_rusher_dist_to_defence_centroid': rusher_dist_to_defence_centroid,
-
-        'phys_defender_dist_to_runner_min': defender_dist_to_runner_min,
-
         'phys_defender_time_to_runner_min': defender_time_to_runner_min,
 
-        'phys_closest_defender_force_div_rusher_force': closest_defender_force_div_rusher_force,
         'phys_closest_bytime_defender_force_div_rusher_force': closest_bytime_defender_force_div_rusher_force,
 
         'phys_closest_bytime_defender_speed_div_rusher_speed': closest_bytime_defender_speed_div_rusher_speed,
@@ -493,8 +473,53 @@ def compute_phys_features(df):
     features_df = pd.DataFrame(features_rows, index=playid_index)
     return features_df
 
-def make_x(df, encode=True, fillna=True, verbose=True):
-    """Input: source data, preprocesed.
+def compute_rusher_features(df, counters=None):
+    if counters: 
+        (games_counter, plays_counter, last_game, plays_cur_game_counter) = counters
+    else:
+        games_counter = Counter()
+        plays_counter = Counter()
+        # yards_counter = Counter()
+
+        last_game = {}
+        plays_cur_game_counter = Counter()
+
+    feature_rows = []
+    for row in df[df.IsRusher].itertuples():
+        game_id = row.GameId
+        # yards = row.Yards
+        rusher_id = row.NflId
+
+        rusher_games = games_counter[rusher_id]
+        rusher_plays = plays_counter[rusher_id]
+        rusher_plays_current_game = plays_cur_game_counter[rusher_id] if game_id == last_game.get(rusher_id) else 0 # tiredness
+        # rusher_yards = yards_counter[rusher_id]
+
+        row = (rusher_id, rusher_plays, rusher_games, rusher_plays_current_game)
+
+        feature_rows.append(row)
+
+        if not last_game.get(rusher_id) or game_id != last_game[rusher_id]:
+            last_game[rusher_id] = game_id
+            games_counter[rusher_id] +=1
+            plays_cur_game_counter[rusher_id] = 0
+
+        plays_counter[rusher_id] += 1
+        plays_cur_game_counter[rusher_id] += 1
+        # yards_counter[rusher_id] += yards
+        
+    rusher_stats_features = pd.DataFrame(feature_rows, 
+                                        index=df[df.IsRusher].PlayId,
+                                        columns = ['rusher_id', 'rusher_plays', 'rusher_games', 'rusher_plays_current_game'])
+    # rusher_stats_features['rusher_yards_per_game'] = (rusher_stats_features['rusher_yards'] / rusher_stats_features['rusher_games']).fillna(0)
+    # rusher_stats_features['rusher_yards_per_play'] = (rusher_stats_features['rusher_yards'] / rusher_stats_features['rusher_plays']).fillna(0)
+    rusher_stats_features['rusher_plays_per_game'] = (rusher_stats_features['rusher_plays'] / rusher_stats_features['rusher_games']).fillna(0)
+    
+    return rusher_stats_features, (games_counter, plays_counter, last_game, plays_cur_game_counter)
+
+def make_x(df, stats_counters=None, encode=True, fillna=True, verbose=True, fe_phys=True):
+    """Input: source data, preprocesed, feature dfs.
+
        Output: X dataframe
     """
     source_play_id = df['PlayId']
@@ -513,11 +538,13 @@ def make_x(df, encode=True, fillna=True, verbose=True):
 
     df['Force'] = df['A'] * df['PlayerWeight']
 
-    if verbose:
-        print('Computing phys features')
+    
+    if fe_phys:
+        if verbose:
+            print('Computing phys features')
+        phys_features = compute_phys_features(df)
 
-    phys_features = compute_phys_features(df)
-
+    rusher_stats_features, rusher_stats_counters = compute_rusher_features(df, counters=stats_counters)
     # Assemble X
 
     # Drop unnececary rows, keep only rusher
@@ -533,7 +560,8 @@ def make_x(df, encode=True, fillna=True, verbose=True):
         'HomeTeamAbbr', 'VisitorTeamAbbr', 'Stadium', 'Location', 'GameId',
         'PlayId', 'Team', 'IsRusher', 'IsQB', 'IsOnOffense', 'Toleft',
         'HomeOnOffense', 'Temperature', 'Humidity', 'WindSpeed', 'GameWeather',
-        'WindDirection', 'ToLeft', 'X', 'Y', 'Dis', 'PlayerWeight', 'PlayerHeight'
+        'WindDirection', 'ToLeft', 'X', 'Y', 'Dis', 
+        'Orientation'
     ]
     cols_to_drop = list(set(cols_to_drop).intersection(set(list(df.columns))))
     df.drop(cols_to_drop, axis=1, inplace=True)
@@ -541,31 +569,33 @@ def make_x(df, encode=True, fillna=True, verbose=True):
     if verbose:
         print('Dropped cols:', cols_to_drop)
 
-    # Assemble X
-    
-    # Get player columns
+    # Assemble players features
     cols_player = ['S',
                    'A',
-                   'Orientation',
                    'Dir',
                    'PlayerBMI',
                    'PlayerAge',
-                   'Force']
-                
+                   'PlayerWeight',
+                   'PlayerHeight', 
+                   'Force',
+                   'JerseyNumber']
+
     X_df = df.copy()
-
     # Add features
+    if fe_phys:
+        X_df = pd.concat([X_df, phys_features], axis=1)
 
-    X_df = pd.concat([X_df, phys_features], axis=1)
-
+    X_df = pd.concat([X_df, rusher_stats_features], axis=1)
+    X_df.drop(['rusher_id'], axis=1, inplace=True)
     # Pospreprocesing
 
     X_df = X_df.replace([np.inf, -np.inf], np.nan)
 
     if fillna:
         X_df.fillna(-999, inplace=True)
-
-    X_df = reduce_mem_usage(X_df)
+    
+    if X_df.shape[0] > 1000:
+        X_df = reduce_mem_usage(X_df, verbose=verbose)
 
     assert X_df.shape[0] == source_play_id.drop_duplicates().count()
-    return X_df
+    return X_df, rusher_stats_counters
